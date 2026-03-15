@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Data — do NOT commit raw CSVs (they can be large)
+data/raw/*.csv
+
+# Model weights — can be large; commit .onnx only if small enough
+model/*.pt
+model/training_curves.png
+model/confusion_matrix.png
+
+# Node / web
+web/node_modules/
+web/dist/
+web/.env
+
+# ONNX WASM copies (regenerated at build time)
+web/public/*.wasm
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
