@@ -2,8 +2,10 @@
 MLP architecture for rude-gesture classification.
 
 Input  : 63 features  (21 landmarks × 3 coords, normalised)
-Hidden : 128 → 64 → 32  (ReLU + BatchNorm + Dropout 0.3)
+Hidden : 256 → 128 → 64 → 32  (ReLU + BatchNorm + Dropout 0.3)
 Output : 7 classes  (raw logits — use CrossEntropyLoss during training)
+
+Loss   : CrossEntropyLoss (LogSoftmax + NLLLoss; expects raw logits)
 """
 
 import torch
@@ -39,7 +41,8 @@ class GestureMLP(nn.Module):
             )
 
         self.net = nn.Sequential(
-            block(NUM_FEATURES, 128),
+            block(NUM_FEATURES, 256),
+            block(256, 128),
             block(128, 64),
             block(64, 32),
             nn.Linear(32, NUM_CLASSES),   # raw logits — no final softmax
