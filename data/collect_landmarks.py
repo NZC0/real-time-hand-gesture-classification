@@ -22,13 +22,19 @@ to hand position and size in the frame.
 """
 
 import csv
-import os
 import time
+import urllib.request
+
 from pathlib import Path
 
 import cv2
 import mediapipe as mp
 import numpy as np
+from mediapipe.tasks.python import BaseOptions
+from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions
+from mediapipe.tasks.python.vision.core.vision_task_running_mode import (
+    VisionTaskRunningMode,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -49,6 +55,38 @@ CSV_HEADERS = (
     [f"{axis}{i}" for i in range(NUM_LANDMARKS) for axis in ("x", "y", "z")]
     + ["label"]
 )
+
+# MediaPipe Tasks model — downloaded once to data/models/
+MODEL_DIR = Path(__file__).parent / "models"
+MODEL_PATH = MODEL_DIR / "hand_landmarker.task"
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
+)
+
+# Hand skeleton connections (MediaPipe standard)
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),       # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),        # index
+    (0, 9), (9, 10), (10, 11), (11, 12),   # middle
+    (0, 13), (13, 14), (14, 15), (15, 16), # ring
+    (0, 17), (17, 18), (18, 19), (19, 20), # pinky
+    (5, 9), (9, 13), (13, 17),             # palm
+]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Model download
+# ──────────────────────────────────────────────────────────────────────────────
+
+def ensure_model() -> None:
+    """Download the hand landmarker model if not already present."""
+    if MODEL_PATH.exists():
+        return
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading hand landmarker model to {MODEL_PATH} ...")
+    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    print("  Done.")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Normalization (MUST match gestureClassifier.js)
@@ -80,6 +118,21 @@ def normalize_landmarks(landmarks: list[tuple[float, float, float]]) -> list[flo
 # ──────────────────────────────────────────────────────────────────────────────
 # Drawing helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
+def draw_hand(
+    frame: np.ndarray,
+    landmarks: list[tuple[float, float, float]],
+) -> None:
+    """Draw hand skeleton (connections + keypoints) on the frame."""
+    h, w = frame.shape[:2]
+    pts = [(int(x * w), int(y * h)) for x, y, z in landmarks]
+
+    for a, b in HAND_CONNECTIONS:
+        cv2.line(frame, pts[a], pts[b], (200, 200, 200), 1, cv2.LINE_AA)
+
+    for pt in pts:
+        cv2.circle(frame, pt, 4, (0, 255, 163), -1, cv2.LINE_AA)
+
 
 def draw_counter(frame: np.ndarray, counts: dict[str, int]) -> None:
     """Overlay per-class sample counts on the frame."""
@@ -116,6 +169,7 @@ def draw_status(frame: np.ndarray, message: str, color=(255, 255, 255)) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    ensure_model()
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     # Track how many samples we already have (resume from existing file)
@@ -141,17 +195,16 @@ def main() -> None:
     for row in existing_rows:
         writer.writerow(row)
 
-    # MediaPipe setup
-    mp_hands = mp.solutions.hands
-    mp_drawing = mp.solutions.drawing_utils
-    mp_drawing_styles = mp.solutions.drawing_styles
-
-    hands = mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=1,
-        min_detection_confidence=0.7,
+    # MediaPipe Tasks setup
+    options = HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=str(MODEL_PATH)),
+        running_mode=VisionTaskRunningMode.IMAGE,
+        num_hands=1,
+        min_hand_detection_confidence=0.7,
+        min_hand_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
+    detector = HandLandmarker.create_from_options(options)
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -160,7 +213,7 @@ def main() -> None:
     last_label: str | None = None
     flash_until: float = 0.0
 
-    print("Press 1-7 to capture a sample for the corresponding class.")
+    print("Press Shift+1 to Shift+7 to capture a sample for the corresponding class.")
     print("Press 'q' to quit and save. Press 'd' to delete the last sample.\n")
 
     while True:
@@ -170,33 +223,27 @@ def main() -> None:
 
         frame = cv2.flip(frame, 1)  # mirror for natural interaction
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = detector.detect(mp_image)
 
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord("q"):
             break
 
-        hand_detected = results.multi_hand_landmarks is not None
+        hand_detected = bool(result.hand_landmarks)
+        landmarks_raw: list[tuple[float, float, float]] = []
 
         if hand_detected:
-            for hand_landmarks in results.multi_hand_landmarks:
-                mp_drawing.draw_landmarks(
-                    frame,
-                    hand_landmarks,
-                    mp_hands.HAND_CONNECTIONS,
-                    mp_drawing_styles.get_default_hand_landmarks_style(),
-                    mp_drawing_styles.get_default_hand_connections_style(),
-                )
+            landmarks_raw = [
+                (lm.x, lm.y, lm.z) for lm in result.hand_landmarks[0]
+            ]
+            draw_hand(frame, landmarks_raw)
 
         # Capture sample
         if key != 255 and chr(key) in CLASSES and hand_detected:
             label = CLASSES[chr(key)]
-            lm_list = [
-                (lm.x, lm.y, lm.z)
-                for lm in results.multi_hand_landmarks[0].landmark
-            ]
-            normalized = normalize_landmarks(lm_list)
+            normalized = normalize_landmarks(landmarks_raw)
             row = normalized + [label]
             writer.writerow(row)
             csv_file.flush()
@@ -207,7 +254,6 @@ def main() -> None:
 
         # Delete last sample
         if key == ord("d") and last_label is not None:
-            # Rewrite file without last row of this label
             csv_file.close()
             rows_to_keep = []
             deleted = False
@@ -239,13 +285,13 @@ def main() -> None:
         elif not hand_detected:
             draw_status(frame, "No hand detected", color=(0, 100, 255))
         else:
-            draw_status(frame, "Press 1-7 to capture | q to quit | d to delete last")
+            draw_status(frame, "Shift+1-7 to capture | q to quit | d to delete last")
 
         cv2.imshow("Rude Gestures — Data Collection", frame)
 
     cap.release()
     csv_file.close()
-    hands.close()
+    detector.close()
     cv2.destroyAllWindows()
 
     total = sum(counts.values())
